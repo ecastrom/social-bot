@@ -248,14 +248,14 @@ def handle_message(message):
 
     # Security: only respond to Edgar
     if chat_id != EDGAR_CHAT_ID:
-        log.warning(f"Ignored message from unknown chat_id: {chat_id}")
+        log.warning(f"REJECTED chat_id={chat_id!r} (expected {EDGAR_CHAT_ID!r})")
         return
 
     body = (message.text or "").strip()
     if not body:
         return
 
-    log.info(f"Message: {body[:80]}")
+    log.info(f"Message from chat_id={chat_id} (expected={EDGAR_CHAT_ID}): {body[:80]}")
 
     state = conversations.get(chat_id, {})
     status = state.get("status", "idle")
