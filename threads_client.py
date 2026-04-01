@@ -28,10 +28,10 @@ class ThreadsClient:
     def _post(self, path: str, data: dict = None) -> dict:
         data = data or {}
         data["access_token"] = self.token
-        r = requests.post(f"{GRAPH_URL}/{path}", data=data, timeout=10)
+        r = requests.post(f"{GRAPH_URL}/{path}", data=data, timeout=30)
         if not r.ok:
             log.error(f"[Threads] POST {path} → {r.status_code}: {r.text}")
-        r.raise_for_status()
+            raise ValueError(f"Threads API error {r.status_code}: {r.text}")
         return r.json()
 
     # ── Publicar ──────────────────────────────────────────────────────────────
@@ -41,10 +41,14 @@ class ThreadsClient:
         Publica en Threads. Proceso en 2 pasos: crear contenedor → publicar.
         media_type: "TEXT" | "IMAGE" | "VIDEO"
         """
+        # Strip Markdown formatting that might leak from Telegram
+        clean_text = text.replace("*", "").replace("_", "").replace("`", "").strip()
+        log.info(f"[Threads] Posting ({len(clean_text)} chars): {clean_text[:80]}...")
+
         # Paso 1: Crear contenedor de media
         container_data = {
             "media_type": media_type,
-            "text": text,
+            "text": clean_text,
         }
 
         if media_path and Path(media_path).exists() and media_type != "TEXT":
