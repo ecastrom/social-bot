@@ -249,11 +249,11 @@ def _publish(chat_id: str, draft: dict):
         threads = ThreadsClient(load_threads_config())
         threads.post(draft["content"])
         conversations.pop(chat_id, None)
-        bot.send_message(chat_id, f"Posted ✓\n\n_{draft['content']}_")
+        bot.send_message(chat_id, f"Posted ✓\n\n{draft['content']}", parse_mode=None)
         log.info(f"Published to Threads: {draft['content'][:60]}...")
     except Exception as e:
         log.error(f"Publish failed: {e}")
-        bot.send_message(chat_id, f"Failed to post to Threads: {e}")
+        bot.send_message(chat_id, f"Failed to post to Threads: {e}", parse_mode=None)
 
 # ---------------------------------------------------------------------------
 # Telegram message handler
