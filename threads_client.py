@@ -29,6 +29,8 @@ class ThreadsClient:
         data = data or {}
         data["access_token"] = self.token
         r = requests.post(f"{GRAPH_URL}/{path}", data=data, timeout=10)
+        if not r.ok:
+            log.error(f"[Threads] POST {path} → {r.status_code}: {r.text}")
         r.raise_for_status()
         return r.json()
 
