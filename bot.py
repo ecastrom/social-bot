@@ -20,7 +20,7 @@ load_dotenv(override=True)
 import database as db
 from config import load_threads_config
 from threads_client import ThreadsClient
-from content_generator import generate_post_drafts
+from content_generator import generate_post_drafts, generate_from_input
 from github_issues import create_approval_issue, check_approved_issues
 
 logging.basicConfig(
@@ -39,7 +39,23 @@ class SocialBot:
         else:
             self.threads = None
 
-    # -- Generate drafts + create approval issue ----------------------------
+    # -- Draft from Edgar's input (primary mode) ----------------------------
+
+    def draft(self, note: str, url: str | None = None):
+        """Generate a post from Edgar's raw thought + optional URL, then open a GitHub issue."""
+        log.info("Generating post from your input...")
+        drafts = generate_from_input(note=note, url=url, num_posts=2)
+
+        if not drafts:
+            log.warning("No drafts generated. Aborting.")
+            return
+
+        log.info(f"Generated {len(drafts)} drafts. Creating GitHub issue...")
+        result = create_approval_issue(drafts)
+        log.info(f"Review issue created: {result['url']}")
+        print(f"\nDrafts ready for review: {result['url']}")
+
+    # -- Generate drafts + create approval issue (scheduled fallback) -------
 
     def generate(self, topics: list[str] | None = None, num_posts: int = 2):
         """Generate draft posts and create a GitHub issue for review."""
@@ -148,8 +164,13 @@ def print_help():
     print("""
 Threads Content Bot -- Commands:
 
+  python bot.py draft "your raw thought" [--url https://...]
+      PRIMARY MODE. Paste a rough idea or reaction; the bot turns it into a
+      polished post and opens a GitHub issue for your approval.
+      Add --url to include an article you are reacting to.
+
   python bot.py generate [topic1 topic2 ...]
-      Generate draft posts and create a GitHub issue for review.
+      SCHEDULED FALLBACK. Autonomous generation with no input from you.
       Optional: provide topic hints as arguments.
 
   python bot.py publish
@@ -169,7 +190,27 @@ Threads Content Bot -- Commands:
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else "help"
 
-    if cmd == "generate":
+    if cmd == "draft":
+        # Parse --url flag and positional note
+        args = sys.argv[2:]
+        url = None
+        note_parts = []
+        i = 0
+        while i < len(args):
+            if args[i] == "--url" and i + 1 < len(args):
+                url = args[i + 1]
+                i += 2
+            else:
+                note_parts.append(args[i])
+                i += 1
+        note = " ".join(note_parts)
+        if not note:
+            print("Usage: python bot.py draft \"your raw thought\" [--url https://...]")
+            sys.exit(1)
+        bot = SocialBot(need_threads=False)
+        bot.draft(note=note, url=url)
+
+    elif cmd == "generate":
         topics = sys.argv[2:] if len(sys.argv) > 2 else None
         bot = SocialBot(need_threads=False)
         bot.generate(topics=topics)

@@ -1,12 +1,19 @@
 """
 content_generator.py — AI-powered content generation for Threads
 Uses Claude to generate posts that reflect Edgar's intellectual voice.
+
+Two modes:
+  generate_from_input(url, note)   — Edgar provides a link + raw reflection (primary)
+  generate_post_drafts(topics)     — Fully autonomous generation (scheduled fallback)
 """
 import logging
 import json
+import re
+import html
 from pathlib import Path
 
 import anthropic
+import requests as http_requests
 
 from config import ANTHROPIC_API_KEY
 
@@ -14,17 +21,11 @@ log = logging.getLogger(__name__)
 
 PROFILE_PATH = Path(__file__).parent / "edgar_profile.md"
 
-SYSTEM_PROMPT = """\
-You are ghostwriting social media posts for Edgar Castro Mendez, an economist \
-at Tecnologico de Monterrey. Edgar has a PhD from George Mason University \
-(public choice, experimental economics, Austrian tradition). He is a classical \
-liberal — skeptical of government intervention but intellectually honest about \
-market failures. He is going on the academic job market soon.
+# ---------------------------------------------------------------------------
+# Shared voice guidelines (used in both prompts)
+# ---------------------------------------------------------------------------
 
-Your job is to write SHORT posts for Threads (max 500 characters each). These \
-posts should sound like Edgar thinking out loud — a real person with real opinions, \
-not a corporate account or an AI-generated motivational poster.
-
+_VOICE = """\
 VOICE GUIDELINES:
 - Casual but rigorous. Like a sharp economist thinking out loud with smart friends.
 - Ground every point in a concrete example, a real case, or an empirical finding.
@@ -34,18 +35,58 @@ VOICE GUIDELINES:
 - Can be funny or wry, but substance comes first.
 - NO politicians by name. No partisan framing. If a policy is interesting, explain
   WHY it produces a certain outcome — not who supports or opposes it.
-- NO ideological slogans or crusading (avoid phrases like "statism", "big government",
-  "free market wins again"). Let the example do the persuading.
+- NO ideological slogans or crusading. Let the example do the persuading.
 - NO hashtags. NO emojis (or at most one, sparingly). NO "thread" or "let me explain" openings.
 - Never start with "As an economist" or similar self-referential framing.
 - Do not sound like a LinkedIn post or a TED talk promo.
 
 LANGUAGE RULES:
-- Write in SPANISH when the topic is about Latin America, Mexican policy, \
-LATAM economics, or local concerns. Use natural Latin American Spanish (Mexican register).
-- Write in ENGLISH when the topic is about international economics, academic life, \
-the job market, or general ideas that travel across borders.
+- Write in SPANISH when the topic is about Latin America, Mexican policy,
+  LATAM economics, or local concerns. Use natural Latin American Spanish (Mexican register).
+- Write in ENGLISH when the topic is about international economics, academic life,
+  the job market, or general ideas that travel across borders.
 - Each post must be in ONE language only. No code-switching within a post.
+
+OUTPUT FORMAT — return ONLY a JSON array, no markdown fences, no commentary.
+Each element must have exactly these fields:
+- "content": the post text (max 500 chars, hard limit)
+- "language": "en" or "es"
+- "topic_tag": a short label (2-4 words, lowercase)
+- "rationale": one sentence explaining why this post is worth publishing
+"""
+
+# ---------------------------------------------------------------------------
+# Prompt for input-driven mode (primary)
+# ---------------------------------------------------------------------------
+
+INPUT_SYSTEM_PROMPT = """\
+You are ghostwriting Threads posts for Edgar Castro Mendez, an economist at \
+Tecnologico de Monterrey (PhD from George Mason — public choice, experimental \
+economics). He is going on the academic job market soon.
+
+Edgar will give you two things:
+1. Something he read or encountered (article text, a quote, an observation)
+2. His raw reaction — a rough note, a fragment, a half-formed thought
+
+Your job is to take HIS thought and sharpen it into a polished Threads post. \
+You are not inventing the idea — you are helping him say clearly what he already \
+thinks. Stay true to his specific reaction; do not drift into generic commentary \
+on the topic.
+
+""" + _VOICE
+
+# ---------------------------------------------------------------------------
+# Prompt for autonomous mode (scheduled fallback)
+# ---------------------------------------------------------------------------
+
+AUTO_SYSTEM_PROMPT = """\
+You are ghostwriting Threads posts for Edgar Castro Mendez, an economist at \
+Tecnologico de Monterrey (PhD from George Mason — public choice, experimental \
+economics). He is going on the academic job market soon.
+
+Generate posts grounded in specific cases, empirical findings, or concrete \
+mechanisms — not general commentary. Each post should feel like a real observation, \
+not a think-piece opener.
 
 CONTENT PRIORITIES:
 - Counterintuitive empirical findings from economics or political science
@@ -54,65 +95,54 @@ CONTENT PRIORITIES:
 - Specific mechanisms: why a particular policy produces a particular result
 - Institutional puzzles: why some places can run good policy and others can't
 - AI and technology changing how things work in practice
-- Academic life and job market observations (light touch, occasional)
 
-Return your output as a JSON array. Each element must have exactly these fields:
-- "content": the post text (max 500 chars, hard limit)
-- "language": "en" or "es"
-- "topic_tag": a short label (2-4 words, lowercase, e.g. "price controls", "job market")
-- "rationale": one sentence explaining why this post is worth publishing
-"""
+""" + _VOICE
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def _load_profile() -> str:
-    """Load Edgar's intellectual profile from the markdown file."""
     if PROFILE_PATH.exists():
         return PROFILE_PATH.read_text(encoding="utf-8")
     log.warning(f"Profile not found at {PROFILE_PATH}; generating without it.")
     return ""
 
 
-def generate_post_drafts(topics: list[str] | None = None, num_posts: int = 2) -> list[dict]:
+def _fetch_article(url: str, max_chars: int = 4000) -> str:
     """
-    Generate draft posts using Claude.
-
-    Args:
-        topics: Optional list of topic hints to guide generation.
-        num_posts: Number of posts to generate (default 2).
-
-    Returns:
-        List of dicts with keys: content, language, topic_tag, rationale.
+    Fetch a URL and return a plain-text excerpt of the article body.
+    Uses basic HTML stripping — no extra dependencies needed.
+    Returns empty string on failure (non-blocking).
     """
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    try:
+        resp = http_requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        raw_html = resp.text
 
-    profile_text = _load_profile()
+        # Remove script/style blocks
+        raw_html = re.sub(r"<(script|style)[^>]*>.*?</\1>", "", raw_html, flags=re.DOTALL | re.IGNORECASE)
+        # Strip all tags
+        text = re.sub(r"<[^>]+>", " ", raw_html)
+        # Decode HTML entities
+        text = html.unescape(text)
+        # Collapse whitespace
+        text = re.sub(r"\s+", " ", text).strip()
 
-    user_message = f"Generate exactly {num_posts} Threads posts."
-    if topics:
-        user_message += f"\n\nFocus on these topics: {', '.join(topics)}"
-    if profile_text:
-        user_message += f"\n\nHere is Edgar's full intellectual profile for context:\n\n{profile_text}"
-    user_message += (
-        "\n\nReturn ONLY a JSON array — no markdown fences, no commentary. "
-        "Each post must be under 500 characters."
-    )
+        if len(text) > max_chars:
+            text = text[:max_chars] + "…"
+        log.info(f"Fetched article: {len(text)} chars from {url}")
+        return text
+    except Exception as e:
+        log.warning(f"Could not fetch article at {url}: {e}")
+        return ""
 
-    log.info(f"Requesting {num_posts} draft posts from Claude...")
 
-    response = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=2048,
-        system=SYSTEM_PROMPT,
-        messages=[{"role": "user", "content": user_message}],
-    )
-
-    raw_text = response.content[0].text.strip()
-
-    # Strip markdown fences if the model wrapped them anyway
+def _parse_and_validate(raw_text: str) -> list[dict]:
+    """Parse Claude's JSON output and validate each draft."""
     if raw_text.startswith("```"):
-        lines = raw_text.split("\n")
-        # Remove first line (```json) and last line (```)
-        lines = [l for l in lines if not l.strip().startswith("```")]
+        lines = [l for l in raw_text.split("\n") if not l.strip().startswith("```")]
         raw_text = "\n".join(lines)
 
     try:
@@ -125,7 +155,6 @@ def generate_post_drafts(topics: list[str] | None = None, num_posts: int = 2) ->
     if not isinstance(drafts, list):
         raise ValueError(f"Expected a JSON array, got {type(drafts).__name__}")
 
-    # Validate and sanitize each draft
     validated = []
     required_keys = {"content", "language", "topic_tag", "rationale"}
     for i, draft in enumerate(drafts):
@@ -133,19 +162,12 @@ def generate_post_drafts(topics: list[str] | None = None, num_posts: int = 2) ->
         if missing:
             log.warning(f"Draft {i} missing keys {missing}, skipping.")
             continue
-
-        # Enforce character limit
         if len(draft["content"]) > 500:
-            log.warning(
-                f"Draft {i} is {len(draft['content'])} chars, truncating to 500."
-            )
+            log.warning(f"Draft {i} is {len(draft['content'])} chars, truncating.")
             draft["content"] = draft["content"][:497] + "..."
-
-        # Normalize language tag
         draft["language"] = draft["language"].lower().strip()
         if draft["language"] not in ("en", "es"):
             draft["language"] = "en"
-
         validated.append({
             "content": draft["content"],
             "language": draft["language"],
@@ -155,3 +177,91 @@ def generate_post_drafts(topics: list[str] | None = None, num_posts: int = 2) ->
 
     log.info(f"Generated {len(validated)} valid drafts.")
     return validated
+
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
+
+def generate_from_input(note: str, url: str | None = None, num_posts: int = 2) -> list[dict]:
+    """
+    Primary mode: generate posts from Edgar's raw input.
+
+    Args:
+        note: Edgar's raw reflection — a rough thought, reaction, or insight.
+        url:  Optional URL of an article or source he is reacting to.
+        num_posts: How many post variations to generate (default 2, pick the best one).
+
+    Returns:
+        List of draft dicts.
+    """
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    profile_text = _load_profile()
+
+    parts = []
+
+    if url:
+        article_text = _fetch_article(url)
+        if article_text:
+            parts.append(f"ARTICLE ({url}):\n{article_text}")
+        else:
+            parts.append(f"SOURCE URL (could not fetch content): {url}")
+
+    parts.append(f"EDGAR'S RAW THOUGHT:\n{note.strip()}")
+
+    if profile_text:
+        parts.append(f"EDGAR'S INTELLECTUAL PROFILE (for voice/context):\n{profile_text}")
+
+    parts.append(
+        f"\nGenerate {num_posts} alternative post(s) based on Edgar's thought above. "
+        "Start from his specific reaction — do not broaden it into generic commentary. "
+        "Return ONLY a JSON array, no markdown fences."
+    )
+
+    user_message = "\n\n".join(parts)
+
+    log.info(f"Generating {num_posts} input-driven draft(s)...")
+
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=2048,
+        system=INPUT_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    return _parse_and_validate(response.content[0].text.strip())
+
+
+def generate_post_drafts(topics: list[str] | None = None, num_posts: int = 2) -> list[dict]:
+    """
+    Fallback mode: autonomous generation for scheduled runs with no input.
+
+    Args:
+        topics: Optional topic hints.
+        num_posts: Number of posts to generate.
+
+    Returns:
+        List of draft dicts.
+    """
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    profile_text = _load_profile()
+
+    parts = [f"Generate exactly {num_posts} Threads posts."]
+    if topics:
+        parts.append(f"Focus on these topics: {', '.join(topics)}")
+    if profile_text:
+        parts.append(f"Edgar's intellectual profile:\n{profile_text}")
+    parts.append("Return ONLY a JSON array — no markdown fences, no commentary.")
+
+    user_message = "\n\n".join(parts)
+
+    log.info(f"Requesting {num_posts} autonomous draft posts from Claude...")
+
+    response = client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=2048,
+        system=AUTO_SYSTEM_PROMPT,
+        messages=[{"role": "user", "content": user_message}],
+    )
+
+    return _parse_and_validate(response.content[0].text.strip())
