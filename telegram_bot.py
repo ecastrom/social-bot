@@ -41,7 +41,7 @@ log = logging.getLogger(__name__)
 TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 EDGAR_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]  # numeric string, e.g. "123456789"
 
-bot = telebot.TeleBot(TOKEN, parse_mode="Markdown")
+bot = telebot.TeleBot(TOKEN, parse_mode="Markdown", threaded=False)
 app = Flask(__name__)
 
 # ---------------------------------------------------------------------------
