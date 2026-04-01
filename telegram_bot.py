@@ -278,7 +278,10 @@ def handle_message(message):
 
 @app.route(f"/{TOKEN}", methods=["POST"])
 def webhook():
-    update = telebot.types.Update.de_json(request.data.decode("utf-8"))
+    raw = request.data.decode("utf-8")
+    print(f"[WEBHOOK] Raw update: {raw[:500]}", flush=True)
+    update = telebot.types.Update.de_json(raw)
+    print(f"[WEBHOOK] Update parsed: message={update.message}, edited={update.edited_message}", flush=True)
     bot.process_new_updates([update])
     return "ok", 200
 
