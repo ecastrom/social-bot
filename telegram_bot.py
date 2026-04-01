@@ -261,13 +261,16 @@ def handle_message(message):
     status = state.get("status", "idle")
 
     try:
+        print(f"[HANDLER] status={status}, body={body[:80]}", flush=True)
         if status == "idle":
             handle_idle(chat_id, body)
         elif status == "awaiting_decision":
             handle_awaiting_decision(chat_id, body, state)
         elif status == "awaiting_revision":
             handle_awaiting_revision(chat_id, body, state)
+        print(f"[HANDLER] completed OK", flush=True)
     except Exception as e:
+        print(f"[HANDLER] ERROR: {e}", flush=True)
         log.error(f"Unhandled error: {e}", exc_info=True)
         bot.send_message(chat_id, "Something went wrong. Send a new message to start over.")
         conversations.pop(chat_id, None)
