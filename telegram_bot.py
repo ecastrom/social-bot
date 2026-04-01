@@ -144,10 +144,16 @@ def handle_awaiting_decision(chat_id: str, body: str, state: dict):
         bot.send_message(chat_id, "Discarded. Send a new thought whenever you're ready.")
         return
 
+    # If it's a long message, treat it as a full replacement draft
+    if len(body.strip()) > 50:
+        _revise(chat_id, drafts[0], body.strip(), state)
+        return
+
     bot.send_message(chat_id,
         "Reply:\n"
         "• *1* or *2* to approve and post\n"
         "• *revise 1: your notes* to adjust\n"
+        "• Paste your own version to use it as the draft\n"
         "• *discard* to start over"
     )
 
@@ -190,16 +196,27 @@ def handle_awaiting_revision(chat_id: str, body: str, state: dict):
 # ---------------------------------------------------------------------------
 
 def _revise(chat_id: str, draft: dict, notes: str, state: dict):
-    bot.send_message(chat_id, "Revising...")
+    # If the "notes" look like a complete draft (>100 chars and similar length
+    # to the original), treat them AS the new draft — just polish minimally.
+    notes_look_like_full_draft = len(notes) > 100
 
-    original_note = state.get("original_note", "")
-    revision_prompt = (
-        f"Original thought: {original_note}\n\n"
-        f"Current draft:\n{draft['content']}\n\n"
-        f"Revision notes: {notes}\n\n"
-        f"Rewrite the draft incorporating the revision notes. "
-        f"Keep the same core idea and Edgar's voice."
-    )
+    if notes_look_like_full_draft:
+        bot.send_message(chat_id, "Polishing your version...")
+        revision_prompt = (
+            f"The user wrote this as their preferred draft for a Threads post:\n\n"
+            f"{notes}\n\n"
+            f"Polish it MINIMALLY — fix only typos, grammar, or obvious wording issues. "
+            f"Do NOT change the substance, structure, or tone. Keep it as close to "
+            f"the user's version as possible. If it's already good, return it unchanged."
+        )
+    else:
+        bot.send_message(chat_id, "Revising...")
+        revision_prompt = (
+            f"Current draft:\n{draft['content']}\n\n"
+            f"Revision notes from the author: {notes}\n\n"
+            f"Apply ONLY the specific changes requested. Keep everything else "
+            f"exactly as it was. Do not rewrite from scratch."
+        )
 
     try:
         new_drafts = generate_from_input(note=revision_prompt, url=None, num_posts=1)
