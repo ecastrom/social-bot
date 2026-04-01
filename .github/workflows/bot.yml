@@ -1,0 +1,72 @@
+name: Threads Content Bot
+
+on:
+  schedule:
+    # Generate drafts: Mon & Thu at 9am CST (UTC-6) = 15:00 UTC
+    - cron: "0 15 * * 1,4"
+    # Publish approved: Tue & Fri at 10am CST (UTC-6) = 16:00 UTC
+    - cron: "0 16 * * 2,5"
+
+  workflow_dispatch:
+    inputs:
+      command:
+        description: "Command to run"
+        default: "generate"
+        type: choice
+        options: [generate, publish, metrics, list]
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Restore the SQLite database from previous runs
+      - name: Restore database
+        uses: actions/cache@v4
+        with:
+          path: bot_data.db
+          key: bot-database-${{ github.run_id }}
+          restore-keys: |
+            bot-database-
+
+      - name: Determine command
+        id: cmd
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "command=${{ github.event.inputs.command }}" >> "$GITHUB_OUTPUT"
+          else
+            # Determine command from cron schedule
+            HOUR=$(date -u +%H)
+            DOW=$(date -u +%u)
+            # Mon=1, Thu=4 at 15:00 UTC -> generate
+            # Tue=2, Fri=5 at 16:00 UTC -> publish
+            if [ "$HOUR" = "15" ] && ([ "$DOW" = "1" ] || [ "$DOW" = "4" ]); then
+              echo "command=generate" >> "$GITHUB_OUTPUT"
+            elif [ "$HOUR" = "16" ] && ([ "$DOW" = "2" ] || [ "$DOW" = "5" ]); then
+              echo "command=publish" >> "$GITHUB_OUTPUT"
+            else
+              echo "command=generate" >> "$GITHUB_OUTPUT"
+            fi
+          fi
+
+      - name: Run bot
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          THREADS_APP_ID: ${{ secrets.THREADS_APP_ID }}
+          THREADS_APP_SECRET: ${{ secrets.THREADS_APP_SECRET }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+        run: python bot.py ${{ steps.cmd.outputs.command }}

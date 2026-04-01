@@ -1,0 +1,47 @@
+name: Publish on Approval
+
+on:
+  issue_comment:
+    types: [created]
+
+jobs:
+  publish:
+    # Only run if the comment is on an open issue (not a PR) and contains an approval command
+    if: |
+      github.event.issue.pull_request == null &&
+      (
+        contains(github.event.comment.body, 'approve') ||
+        contains(github.event.comment.body, 'reject')
+      )
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore database
+        uses: actions/cache@v4
+        with:
+          path: bot_data.db
+          key: bot-database-${{ github.run_id }}
+          restore-keys: |
+            bot-database-
+
+      - name: Run publish
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          THREADS_APP_ID: ${{ secrets.THREADS_APP_ID }}
+          THREADS_APP_SECRET: ${{ secrets.THREADS_APP_SECRET }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+        run: python bot.py publish
