@@ -138,13 +138,18 @@ def handle_awaiting_decision(chat_id: str, body: str, state: dict):
         _publish(chat_id, drafts[idx])
         return
 
-    # Revise a specific draft
-    m = re.match(r'^revise\s+([12])\s*:\s*(.+)$', text, re.DOTALL)
+    # Revise a specific draft — several natural formats:
+    # "revise 1: note", "1: note", "1. note", "1 - note"
+    m = (
+        re.match(r'^revise\s+([12])\s*:\s*(.+)$', text, re.DOTALL) or
+        re.match(r'^([12])\s*[.:\-]\s+(.+)$', text, re.DOTALL)
+    )
     if m:
         idx = int(m.group(1)) - 1
         notes = m.group(2).strip()
-        _revise(chat_id, notes, state, draft=drafts[idx])
-        return
+        if idx < len(drafts):
+            _revise(chat_id, notes, state, draft=drafts[idx])
+            return
 
     # As-is (bypass Claude entirely)
     m = re.match(r'^(as.?is|post as.?is)\s*([12]?)$', text)
