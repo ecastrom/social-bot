@@ -72,12 +72,20 @@ def format_drafts(drafts: list[dict]) -> str:
     lines = []
     for i, d in enumerate(drafts, 1):
         lang = d["language"].upper()
-        chars = len(d["content"])
-        lines.append(f"*Draft {i}* ({lang} · {chars} chars)\n{d['content']}")
+        if d.get("thread_part2"):
+            lines.append(
+                f"*Draft {i}* (THREAD · {lang})\n"
+                f"*Post 1:* {d['content']}\n\n"
+                f"*Post 2:* {d['thread_part2']}"
+            )
+        else:
+            chars = len(d["content"])
+            lines.append(f"*Draft {i}* ({lang} · {chars} chars)\n{d['content']}")
     lines.append(
         "\nReply:\n"
         "• *1* or *2* — approve and post to Threads\n"
         "• *revise 1: your notes* — adjust a draft\n"
+        "• *as-is 1* or *as-is 2* — post exactly as written, no AI touches\n"
         "• *discard* — drop both and start over"
     )
     return "\n\n".join(lines)
@@ -135,7 +143,15 @@ def handle_awaiting_decision(chat_id: str, body: str, state: dict):
     if m:
         idx = int(m.group(1)) - 1
         notes = m.group(2).strip()
-        _revise(chat_id, drafts[idx], notes, state)
+        _revise(chat_id, notes, state, draft=drafts[idx])
+        return
+
+    # As-is (bypass Claude entirely)
+    m = re.match(r'^(as.?is|post as.?is)\s*([12]?)$', text)
+    if m:
+        idx = int(m.group(2)) - 1 if m.group(2) else 0
+        idx = max(0, min(idx, len(drafts) - 1))
+        _publish(chat_id, drafts[idx])
         return
 
     # Discard
@@ -144,16 +160,16 @@ def handle_awaiting_decision(chat_id: str, body: str, state: dict):
         bot.send_message(chat_id, "Discarded. Send a new thought whenever you're ready.")
         return
 
-    # If it's a long message, treat it as a full replacement draft
+    # Long message → treat as full replacement draft
     if len(body.strip()) > 50:
-        _revise(chat_id, drafts[0], body.strip(), state)
+        _revise(chat_id, body.strip(), state, draft=drafts[0])
         return
 
     bot.send_message(chat_id,
         "Reply:\n"
         "• *1* or *2* to approve and post\n"
         "• *revise 1: your notes* to adjust\n"
-        "• Paste your own version to use it as the draft\n"
+        "• *as-is 1* or *as-is 2* to post exactly as written\n"
         "• *discard* to start over"
     )
 
@@ -167,15 +183,20 @@ def handle_awaiting_revision(chat_id: str, body: str, state: dict):
         _publish(chat_id, draft)
         return
 
+    # As-is (bypass Claude)
+    if re.match(r'^(as.?is|post as.?is)$', text):
+        _publish(chat_id, draft)
+        return
+
     # Explicit revise command
     m = re.match(r'^revise\s*:\s*(.+)$', text, re.DOTALL)
     if m:
-        _revise(chat_id, draft, m.group(1).strip(), state)
+        _revise(chat_id, m.group(1).strip(), state, draft=draft)
         return
 
     # Free-form revision notes (longer than 15 chars — clearly not a command)
     if text not in ("discard", "reject", "cancel", "no") and len(body.strip()) > 15:
-        _revise(chat_id, draft, body.strip(), state)
+        _revise(chat_id, body.strip(), state, draft=draft)
         return
 
     # Discard
@@ -187,6 +208,7 @@ def handle_awaiting_revision(chat_id: str, body: str, state: dict):
     bot.send_message(chat_id,
         "Reply:\n"
         "• *approve* — post this to Threads\n"
+        "• *as-is* — post exactly as written, no AI touches\n"
         "• *revise: your notes* — adjust further\n"
         "• *discard* — drop it"
     )
@@ -195,28 +217,36 @@ def handle_awaiting_revision(chat_id: str, body: str, state: dict):
 # Core actions
 # ---------------------------------------------------------------------------
 
-def _revise(chat_id: str, draft: dict, notes: str, state: dict):
-    # If the "notes" look like a complete draft (>100 chars and similar length
-    # to the original), treat them AS the new draft — just polish minimally.
-    notes_look_like_full_draft = len(notes) > 100
+def _revise(chat_id: str, notes: str, state: dict, draft: dict = None):
+    if draft is None:
+        draft = state.get("current_draft", {})
 
-    if notes_look_like_full_draft:
-        bot.send_message(chat_id, "Polishing your version...")
-        revision_prompt = (
-            f"The user wrote this as their preferred draft for a Threads post:\n\n"
-            f"{notes}\n\n"
-            f"Polish it MINIMALLY — fix only typos, grammar, or obvious wording issues. "
-            f"Do NOT change the substance, structure, or tone. Keep it as close to "
-            f"the user's version as possible. If it's already good, return it unchanged."
+    # Case A: Edgar pasted a full replacement (>150 chars) — skip Claude, use it directly
+    if len(notes) > 150:
+        content = notes[:497] + "..." if len(notes) > 500 else notes
+        revised = {**draft, "content": content, "thread_part2": None}
+        conversations[chat_id] = {
+            "status": "awaiting_revision",
+            "current_draft": revised,
+            "original_note": state.get("original_note", ""),
+            "original_url": state.get("original_url"),
+        }
+        chars = len(revised["content"])
+        bot.send_message(chat_id,
+            f"*Your version* ({chars} chars)\n\n{revised['content']}\n\n"
+            "Reply *approve* to post, keep editing, or *discard*.",
+            parse_mode=None
         )
-    else:
-        bot.send_message(chat_id, "Revising...")
-        revision_prompt = (
-            f"Current draft:\n{draft['content']}\n\n"
-            f"Revision notes from the author: {notes}\n\n"
-            f"Apply ONLY the specific changes requested. Keep everything else "
-            f"exactly as it was. Do not rewrite from scratch."
-        )
+        return
+
+    # Case B: Short specific correction — apply only that change
+    bot.send_message(chat_id, "Revising...")
+    revision_prompt = (
+        f"Post to edit:\n{draft['content']}\n\n"
+        f"SINGLE CHANGE REQUESTED: {notes}\n\n"
+        f"Make ONLY that specific change. Touch nothing else — not the structure, "
+        f"not the examples, not the tone. Return the post with just that one edit applied."
+    )
 
     try:
         new_drafts = generate_from_input(note=revision_prompt, url=None, num_posts=1)
@@ -236,10 +266,10 @@ def _revise(chat_id: str, draft: dict, notes: str, state: dict):
         "original_url": state.get("original_url"),
     }
 
+    chars = len(revised["content"])
     bot.send_message(chat_id,
-        f"*Revised* ({len(revised['content'])} chars)\n\n"
-        f"{revised['content']}\n\n"
-        "Reply *approve* to post, or keep sending revision notes, or *discard*."
+        f"*Revised* ({chars} chars)\n\n{revised['content']}\n\n"
+        "Reply *approve* to post, *as-is* to post exactly this, keep sending notes, or *discard*."
     )
 
 
@@ -247,9 +277,14 @@ def _publish(chat_id: str, draft: dict):
     bot.send_message(chat_id, "Posting to Threads...")
     try:
         threads = ThreadsClient(load_threads_config())
-        threads.post(draft["content"])
+        result = threads.post(draft["content"])
+        if draft.get("thread_part2"):
+            threads.reply(draft["thread_part2"], result["id"])
+            confirmation = f"Thread posted ✓ (2 posts)\n\n{draft['content']}\n\n---\n{draft['thread_part2']}"
+        else:
+            confirmation = f"Posted ✓\n\n{draft['content']}"
         conversations.pop(chat_id, None)
-        bot.send_message(chat_id, f"Posted ✓\n\n{draft['content']}", parse_mode=None)
+        bot.send_message(chat_id, confirmation, parse_mode=None)
         log.info(f"Published to Threads: {draft['content'][:60]}...")
     except Exception as e:
         log.error(f"Publish failed: {e}")
